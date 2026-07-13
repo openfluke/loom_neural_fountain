@@ -4,8 +4,10 @@
 
 ```bash
 cd loom_neural_fountain
-./run.sh                 # full 56k train / 14k val · K=16
-./run.sh quick           # 4k subset · K=8 smoke
+./run.sh                      # full 56k train / 14k val · K=16
+./run.sh quick                # 4k subset · K=8 smoke
+./run.sh showcase             # all layer families × all 21 dtypes (+ log/csv)
+./run.sh showcase quick       # smoke subset of the spectrum
 go run . -k 32 -epochs 8
 ```
 
@@ -13,6 +15,23 @@ Uses `../loom_seed_mnist/data` if present; otherwise downloads MNIST into `./dat
 
 Core library: [`poly.NeuralFountain`](../loom/poly/neural_fountain.go) (any model / data).  
 MNIST helpers: [`github.com/openfluke/loom/neural`](../loom/neural) façade.
+
+### Spectrum showcase
+
+`./run.sh showcase` trains tiny specialists for every **layer family × numerical type**, ships each through the LT fountain, and writes a full timing log + CSV under `logs/`:
+
+| Family | Coverage |
+|--------|----------|
+| dense, swiglu, mha, residual | MLP / attention / skip |
+| cnn1, cnn2, cnn3 | 1D / 2D / 3D conv |
+| rnn, lstm, embedding | sequence |
+
+Dtypes: all 21 from `poly.SeedDTypesAll()` (float64…binary). Quick mode keeps **all 10 families** × **7** representative dtypes.
+
+```bash
+./run.sh showcase quick
+./run.sh showcase -family dense,cnn1 -dtype float32,float16,int8 -log logs/my_run.log
+```
 
 ---
 
@@ -67,12 +86,17 @@ Specialists alone usually hit ~97–98% **on their own shard**; the Master is ho
 
 | Flag / env | Default | Meaning |
 |------------|---------|---------|
-| *(none)* | K=16, 5 epochs | full 80/20 |
-| `./run.sh quick` / `LOOM_NEURAL_FOUNTAIN_QUICK=1` | K=8, 4k train | fast smoke |
-| `-k N` | 16 | number of specialists / shards |
-| `-epochs N` | 5 | `poly.Train` epochs per specialist |
-| `-loss` | 0.3 | fountain drop erase rate |
-| `[dataDir]` | auto | MNIST gzip directory |
+| *(none)* | K=16, 5 epochs | full 80/20 MNIST |
+| `./run.sh quick` / `LOOM_NEURAL_FOUNTAIN_QUICK=1` | K=8, 4k train | fast MNIST smoke |
+| `./run.sh showcase` | K=3, 1 epoch | all layers × 21 dtypes + `logs/*.log`+`.csv` |
+| `./run.sh showcase quick` | subset | 8 families × 7 dtypes smoke |
+| `-k N` | 16 / 3 | number of specialists / shards |
+| `-epochs N` | 5 / 1 | `poly.Train` epochs per specialist |
+| `-loss` | 0.3 / 0.25 | fountain drop erase rate |
+| `-log PATH` | auto under `logs/` | spectrum full log path |
+| `-family a,b` | all | spectrum family filter |
+| `-dtype a,b` | all 21 | spectrum dtype filter |
+| `[dataDir]` | auto | MNIST gzip directory (MNIST mode) |
 
 More specialists → smaller shards → easier shard memorization → higher oracle coverage, larger fountain payload. Fewer specialists → each net sees more data, slower specialize phase.
 
