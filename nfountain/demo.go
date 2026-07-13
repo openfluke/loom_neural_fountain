@@ -45,8 +45,8 @@ func Run(dataDir string, cfg Config) bool {
 	fmt.Println("║  Neural Fountain — specialists · LT peel · Master net    ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════╝")
 	fmt.Println()
-	fmt.Println("Paradigm (loom/neural): same spray/peel that recovers 56k pixels,")
-	fmt.Println("but source blocks = trained specialist WEIGHTS (poly.Train, no seed hunt).")
+	fmt.Println("Paradigm (poly.NeuralFountain): same spray/peel that recovers pixels,")
+	fmt.Println("but source blocks = trained specialist WEIGHTS (any VolumetricNetwork factory).")
 	fmt.Println("Recover all specialists byte-exact → assemble Master ensemble.")
 	fmt.Println("Oracle routing on train ≈ covering every train sample (the 100% story).")
 	fmt.Println()
@@ -80,15 +80,11 @@ func Run(dataDir string, cfg Config) bool {
 	oracle := neural.EvalOracleTrainAccuracy(master, train)
 	ensTrain := neural.EvalEnsembleAccuracy(master, train)
 	ensVal := neural.EvalEnsembleAccuracy(master, valSubset(val, cfg.HeatVal))
-	meanVal := neural.EvalMeanNetAccuracy(master, valSubset(val, cfg.HeatVal))
 
 	fmt.Println("\n── Master scores ──")
 	fmt.Printf("  oracle train coverage   = %.2f%%  (shard expert owns each train point)\n", oracle*100)
 	fmt.Printf("  ensemble train          = %.2f%%\n", ensTrain*100)
 	fmt.Printf("  ensemble val            = %.2f%%\n", ensVal*100)
-	if master.MeanNet != nil {
-		fmt.Printf("  weight-mean net val     = %.2f%%\n", meanVal*100)
-	}
 	fmt.Printf("  recovered specialists   = %d/%d (fountain byte-exact)\n", master.Recovered, master.K)
 
 	printHeatmap(master, valSubset(val, cfg.HeatVal), "val ensemble AFTER Neural Fountain")

@@ -11,7 +11,8 @@ go run . -k 32 -epochs 8
 
 Uses `../loom_seed_mnist/data` if present; otherwise downloads MNIST into `./data`.
 
-Core library: [`github.com/openfluke/loom/neural`](../loom/neural).
+Core library: [`poly.NeuralFountain`](../loom/poly/neural_fountain.go) (any model / data).  
+MNIST helpers: [`github.com/openfluke/loom/neural`](../loom/neural) façade.
 
 ---
 
@@ -77,19 +78,21 @@ More specialists → smaller shards → easier shard memorization → higher ora
 
 ---
 
-## Files
+## Generic use (any net / any data)
 
-```text
-loom_neural_fountain/
-  main.go / run.sh / README.md
-  nfountain/demo.go          # MNIST load · AssembleMaster · heatmaps
-loom/neural/                 # paradigm library
-  doc.go                     # package story
-  assemble.go                # shards · Train · LT peel · Master
-  master.go                  # ensemble / oracle forward
-  pack.go                    # FP32 weights ↔ []byte
-  lt.go                      # LT spray / peel (same idea as pixel demo)
+```go
+// Your architecture — dense, CNN, residual, …
+factory := func(i int) (*poly.VolumetricNetwork, error) {
+    // build a fresh specialist with identical weight layout
+    return buildMyNet(i)
+}
+// or: factory := poly.DenseSpecialistFactory("name", sizes, nil)
+
+master, err := poly.NeuralFountain(factory, batches, poly.DefaultNeuralFountainConfig())
+out, err := master.Forward(input) // average specialist outputs
 ```
+
+This MNIST demo is just one factory + `TrainingBatch` source.
 
 ---
 
