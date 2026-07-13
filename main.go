@@ -73,10 +73,22 @@ func main() {
 				os.Exit(2)
 			}
 			spec.DTypes = dts
+		case a == "-strict" || a == "--strict":
+			spec.Strict = true
 		case a == "-exact" || a == "--exact":
 			spec.UseExact = true
 		case a == "-no-exact" || a == "--no-exact":
 			spec.UseExact = false
+		case a == "-min-oracle" && i+1 < len(args):
+			i++
+			if v, err := strconv.ParseFloat(args[i], 64); err == nil {
+				spec.MinOracle = v
+			}
+		case a == "-batches" && i+1 < len(args):
+			i++
+			if v, err := strconv.Atoi(args[i]); err == nil && v > 0 {
+				spec.Batches = v
+			}
 		case a == "-h" || a == "--help" || a == "help":
 			printUsage()
 			return
@@ -188,14 +200,23 @@ MNIST flags:
   -loss R         fountain erase rate
 
 Showcase flags:
-  -quick                  subset of families × dtypes (smoke)
-  -k N                    specialists (default 3)
-  -epochs N               epochs per specialist (default 1)
+  -quick                  subset of dtypes (smoke)
+  -k N                    specialists (default 8; quick→4)
+  -epochs N               epochs per specialist (default 40; quick→12)
+  -batches N              micro-task samples (default K*16)
   -loss R                 fountain erase rate (default 0.25)
+  -min-oracle PCT         quality target (dense oracle ≥90; other families fit ≥55)
+  -strict                 treat quality WEAK as run failure (default: warn only)
   -log PATH               write full log here (default logs/neural_fountain_spectrum_*.log)
   -family a,b,c           limit families (dense,swiglu,mha,cnn1,cnn2,cnn3,rnn,lstm,embedding,residual)
   -dtype a,b              limit dtypes (e.g. float32,float16,int8)
-  -exact / -no-exact      UseExactDType (default on)
+  -exact / -no-exact      native-dtype train stress (default off = FP32 SoT + morph)
+
+Pipeline (layers mode):
+  micro-specialize shards → pack FP32 Masters → LT spray/peel → unpack Master
+  → score oracle/ensemble → morph experts to case dtype
+  Dense classification targets ≥90% oracle (micro-shards consolidating through fountain).
+
 
 Examples:
   ./run.sh

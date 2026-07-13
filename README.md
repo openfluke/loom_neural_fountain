@@ -4,10 +4,12 @@
 
 ```bash
 cd loom_neural_fountain
-./run.sh                      # full 56k train / 14k val · K=16
-./run.sh quick                # 4k subset · K=8 smoke
-./run.sh showcase             # all layer families × all 21 dtypes (+ log/csv)
-./run.sh showcase quick       # smoke subset of the spectrum
+./run.sh                      # interactive menu: normal vs layers spectrum
+./run.sh 1                    # MNIST Neural Fountain (full)
+./run.sh 1 quick              # MNIST smoke · 4k · K=8
+./run.sh 2                    # full spectrum: all layers × all 21 dtypes (+ log/csv)
+./run.sh 2 quick              # spectrum smoke · 10 families × 7 dtypes
+./run.sh layers -family dense,mha -dtype float32,int8
 go run . -k 32 -epochs 8
 ```
 
@@ -18,20 +20,15 @@ MNIST helpers: [`github.com/openfluke/loom/neural`](../loom/neural) façade.
 
 ### Spectrum showcase
 
-`./run.sh showcase` trains tiny specialists for every **layer family × numerical type**, ships each through the LT fountain, and writes a full timing log + CSV under `logs/`:
+`./run.sh 2` runs the **full Neural Fountain pipeline** on every layer × dtype — not a dry smoke:
 
-| Family | Coverage |
-|--------|----------|
-| dense, swiglu, mha, residual | MLP / attention / skip |
-| cnn1, cnn2, cnn3 | 1D / 2D / 3D conv |
-| rnn, lstm, embedding | sequence |
+1. **Micro-specialize** K shard experts on a small learnable task  
+2. **Pack** FP32 weight Masters  
+3. **LT spray/peel** recover specialists byte-exact  
+4. **Score** oracle / ensemble (dense aims **≥90% oracle**)  
+5. **Morph** recovered experts to the case dtype + forward smoke  
 
-Dtypes: all 21 from `poly.SeedDTypesAll()` (float64…binary). Quick mode keeps **all 10 families** × **7** representative dtypes.
-
-```bash
-./run.sh showcase quick
-./run.sh showcase -family dense,cnn1 -dtype float32,float16,int8 -log logs/my_run.log
-```
+Logs + CSV land under `logs/`. Quality **WEAK** means the fountain recovered but fit was soft; pipeline still OK. Use `-strict` to fail on WEAK.
 
 ---
 
@@ -86,10 +83,11 @@ Specialists alone usually hit ~97–98% **on their own shard**; the Master is ho
 
 | Flag / env | Default | Meaning |
 |------------|---------|---------|
-| *(none)* | K=16, 5 epochs | full 80/20 MNIST |
-| `./run.sh quick` / `LOOM_NEURAL_FOUNTAIN_QUICK=1` | K=8, 4k train | fast MNIST smoke |
-| `./run.sh showcase` | K=3, 1 epoch | all layers × 21 dtypes + `logs/*.log`+`.csv` |
-| `./run.sh showcase quick` | subset | 8 families × 7 dtypes smoke |
+| `./run.sh` (no args) | menu | choose **1 normal** or **2 layers** |
+| `./run.sh 1` / `normal` | K=16, 5 epochs | full 80/20 MNIST |
+| `./run.sh 1 quick` | K=8, 4k train | fast MNIST smoke |
+| `./run.sh 2` / `layers` | K=3, 1 epoch | all layers × 21 dtypes + `logs/*.log`+`.csv` |
+| `./run.sh 2 quick` | subset | 10 families × 7 dtypes smoke |
 | `-k N` | 16 / 3 | number of specialists / shards |
 | `-epochs N` | 5 / 1 | `poly.Train` epochs per specialist |
 | `-loss` | 0.3 / 0.25 | fountain drop erase rate |

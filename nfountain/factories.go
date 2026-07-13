@@ -26,13 +26,24 @@ func spectrumFamilies() []layerFamily {
 	}
 }
 
-func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.NetworkFactory, []poly.TrainingBatch[float32], error) {
+// spectrumTask describes how batches were built so eval can score consolidate quality.
+type spectrumTask struct {
+	Factory  poly.NetworkFactory
+	Batches  []poly.TrainingBatch[float32]
+	Classify bool // argmax accuracy; else MSE fit score
+	LossType string
+}
+
+func spectrumFactoryAndBatches(family string, dt poly.DType, k, nBatches int) (spectrumTask, error) {
 	dtName := dt.String()
-	nBatches := max(8, k*4)
+	if nBatches < k*8 {
+		nBatches = k * 8
+	}
 
 	switch family {
 	case "dense":
-		sizes := []int{8, 12, 6, 4}
+		// Micro multi-class: each shard specializes on its slice; Master consolidates.
+		sizes := []int{16, 32, 16, 4}
 		factory := func(idx int) (*poly.VolumetricNetwork, error) {
 			topo := poly.DenseTopologySeed("nf-spectrum-dense", sizes)
 			topo ^= uint64(idx+1) * 0x9e3779b97f4a7c15
@@ -49,7 +60,12 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 			last.Activation = poly.ActivationLinear
 			return net, nil
 		}
-		return factory, syntheticVectorBatches(nBatches, sizes[0], sizes[len(sizes)-1]), nil
+		return spectrumTask{
+			Factory:  factory,
+			Batches:  microClassBatches(nBatches, sizes[0], sizes[len(sizes)-1]),
+			Classify: true,
+			LossType: "mse",
+		}, nil
 
 	case "swiglu":
 		specs := []poly.SwiGLUSpec{{Hidden: 8, Intermediate: 16}}
@@ -62,8 +78,10 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 			}
 			return poly.BuildSwiGLUVolumetricFromManifest(m)
 		}
-		batches, err := probeIOBatches(factory, vec(8), nBatches)
-		return factory, batches, err
+		// Same pattern as seed_showcase: one probe input, fixed target, many repeats —
+		// specialists memorize the map; fountain must still recover weights to consolidate.
+		batches, err := repeatedProbeFitBatches(factory, vec(8), nBatches)
+		return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, err
 
 	case "mha":
 		specs := []poly.MHASpec{{DModel: 8, NumHeads: 2, NumKVHeads: 2, HeadDim: 4, QueryDim: 8}}
@@ -76,15 +94,15 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 			}
 			return poly.BuildMHAVolumetricFromManifest(m)
 		}
-		batches, err := probeIOBatches(factory, vec(8), nBatches)
-		return factory, batches, err
+		batches, err := variedVectorFitBatches(factory, 8, nBatches)
+		return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, err
 
 	case "cnn1":
-		return cnnFamily(1, 8, dtName, nBatches)
+		return cnnFitTask(1, 8, dtName, nBatches)
 	case "cnn2":
-		return cnnFamily(2, 8, dtName, nBatches)
+		return cnnFitTask(2, 8, dtName, nBatches)
 	case "cnn3":
-		return cnnFamily(3, 4, dtName, nBatches)
+		return cnnFitTask(3, 4, dtName, nBatches)
 
 	case "rnn":
 		sizes := []int{4, 6}
@@ -97,8 +115,8 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 			}
 			return poly.BuildRNNVolumetricFromManifest(m)
 		}
-		batches, err := probeIOBatches(factory, vec(4), nBatches)
-		return factory, batches, err
+		batches, err := variedVectorFitBatches(factory, 4, nBatches)
+		return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, err
 
 	case "lstm":
 		sizes := []int{4, 6}
@@ -111,8 +129,8 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 			}
 			return poly.BuildLSTMVolumetricFromManifest(m)
 		}
-		batches, err := probeIOBatches(factory, vec(4), nBatches)
-		return factory, batches, err
+		batches, err := variedVectorFitBatches(factory, 4, nBatches)
+		return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, err
 
 	case "embedding":
 		spec := poly.EmbeddingSpec{VocabSize: 16, EmbeddingDim: 8, SeqLen: 4}
@@ -130,17 +148,23 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 		for i := range batches {
 			tok := poly.EmbeddingDemoTokens(spec.VocabSize, spec.SeqLen)
 			for j := range tok.Data {
-				tok.Data[j] = float32((i + j) % spec.VocabSize)
+				tok.Data[j] = float32((i*3 + j) % spec.VocabSize)
+			}
+			tgt := make([]float32, outDim)
+			for j := range tgt {
+				// Embedding should map token id → smooth value; tile by seq.
+				tokID := tok.Data[j%len(tok.Data)]
+				tgt[j] = tokID / float32(spec.VocabSize)
 			}
 			batches[i] = poly.TrainingBatch[float32]{
 				Input:  tok,
-				Target: poly.NewTensorFromSlice(sinVec(outDim), 1, outDim),
+				Target: poly.NewTensorFromSlice(tgt, 1, outDim),
 			}
 		}
-		return factory, batches, nil
+		return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, nil
 
 	case "residual":
-		spec := poly.ResidualSpec{In: 4, Out: 4}
+		spec := poly.ResidualSpec{In: 8, Out: 8}
 		factory := func(idx int) (*poly.VolumetricNetwork, error) {
 			topo := poly.ResidualTopologySeed("nf-spectrum-res", spec)
 			topo ^= uint64(idx + 1)
@@ -150,14 +174,14 @@ func spectrumFactoryAndBatches(family string, dt poly.DType, k int) (poly.Networ
 			}
 			return poly.BuildResidualVolumetricFromManifest(m)
 		}
-		batches, err := probeIOBatches(factory, vec(4), nBatches)
-		return factory, batches, err
+		batches, err := variedVectorFitBatches(factory, 8, nBatches)
+		return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, err
 	}
 
-	return nil, nil, fmt.Errorf("unknown family %q", family)
+	return spectrumTask{}, fmt.Errorf("unknown family %q", family)
 }
 
-func cnnFamily(dim, spatial int, dtName string, nBatches int) (poly.NetworkFactory, []poly.TrainingBatch[float32], error) {
+func cnnFitTask(dim, spatial int, dtName string, nBatches int) (spectrumTask, error) {
 	spec := poly.CNNSpec{Dim: dim, InputChannels: 2, Filters: 4, Spatial: spatial, KernelSize: 3}
 	factory := func(idx int) (*poly.VolumetricNetwork, error) {
 		topo := poly.CNNTopologySeed(fmt.Sprintf("nf-spectrum-cnn%d", dim), []poly.CNNSpec{spec})
@@ -168,21 +192,48 @@ func cnnFamily(dim, spatial int, dtName string, nBatches int) (poly.NetworkFacto
 		}
 		return poly.BuildCNNVolumetricFromManifest(m)
 	}
-	in := poly.CNNDemoInput(spec)
-	if in == nil {
-		return nil, nil, fmt.Errorf("cnn%d: nil demo input", dim)
+	base := poly.CNNDemoInput(spec)
+	if base == nil {
+		return spectrumTask{}, fmt.Errorf("cnn%d: nil demo input", dim)
 	}
-	batches, err := probeIOBatchesWithInput(factory, in, nBatches)
-	return factory, batches, err
+	// Probe output shape once.
+	net, err := factory(0)
+	if err != nil {
+		return spectrumTask{}, err
+	}
+	poly.WireNetworkLayers(net)
+	net.ReleaseFP32MasterWhenIdle = false
+	_ = poly.ConfigureNetworkForMode(net, poly.TrainingModeCPUMC)
+	net.EnsureTrainingWeights()
+	out, _, _ := poly.ForwardPolymorphic(net, base)
+	if out == nil || len(out.Data) == 0 {
+		return spectrumTask{}, fmt.Errorf("cnn%d: probe nil", dim)
+	}
+	outN := len(out.Data)
+	outShape := append([]int(nil), out.Shape...)
+
+	batches := make([]poly.TrainingBatch[float32], nBatches)
+	for i := range batches {
+		in := base.Clone()
+		for j := range in.Data {
+			in.Data[j] = float32(math.Sin(float64(i*17+j+1)*0.13))*0.5 + float32((i+j)%5)/10
+		}
+		tgt := make([]float32, outN)
+		for j := range tgt {
+			// Project input energy into output dims — easier than random sines.
+			tgt[j] = in.Data[j%len(in.Data)] * 0.5
+		}
+		batches[i] = poly.TrainingBatch[float32]{
+			Input:  in,
+			Target: poly.NewTensorFromSlice(tgt, outShape...),
+		}
+	}
+	return spectrumTask{Factory: factory, Batches: batches, LossType: "mse"}, nil
 }
 
-// probeIOBatches builds one net, runs ForwardPolymorphic, and makes MSE targets of matching shape.
-func probeIOBatches(factory poly.NetworkFactory, inData []float32, n int) ([]poly.TrainingBatch[float32], error) {
+// repeatedProbeFitBatches: fixed I/O map (showcase-style) repeated across shards.
+func repeatedProbeFitBatches(factory poly.NetworkFactory, inData []float32, n int) ([]poly.TrainingBatch[float32], error) {
 	in := poly.NewTensorFromSlice(inData, 1, len(inData))
-	return probeIOBatchesWithInput(factory, in, n)
-}
-
-func probeIOBatchesWithInput(factory poly.NetworkFactory, in *poly.Tensor[float32], n int) ([]poly.TrainingBatch[float32], error) {
 	net, err := factory(0)
 	if err != nil {
 		return nil, err
@@ -195,12 +246,53 @@ func probeIOBatchesWithInput(factory poly.NetworkFactory, in *poly.Tensor[float3
 	if out == nil || len(out.Data) == 0 {
 		return nil, fmt.Errorf("probe forward returned nil/empty")
 	}
-	tgt := poly.NewTensorFromSlice(sinVec(len(out.Data)), out.Shape...)
+	tgtData := make([]float32, len(out.Data))
+	for j := range tgtData {
+		tgtData[j] = float32(math.Sin(float64(j+1) * 0.41))
+	}
+	tgt := poly.NewTensorFromSlice(tgtData, out.Shape...)
 	batches := make([]poly.TrainingBatch[float32], n)
 	for i := range batches {
 		batches[i] = poly.TrainingBatch[float32]{
 			Input:  in.Clone(),
 			Target: tgt.Clone(),
+		}
+	}
+	return batches, nil
+}
+
+// variedVectorFitBatches: learnable near-identity map (micro-fit, not random sin chase).
+func variedVectorFitBatches(factory poly.NetworkFactory, inDim, n int) ([]poly.TrainingBatch[float32], error) {
+	net, err := factory(0)
+	if err != nil {
+		return nil, err
+	}
+	poly.WireNetworkLayers(net)
+	net.ReleaseFP32MasterWhenIdle = false
+	_ = poly.ConfigureNetworkForMode(net, poly.TrainingModeCPUMC)
+	net.EnsureTrainingWeights()
+	probeIn := poly.NewTensorFromSlice(vec(inDim), 1, inDim)
+	out, _, _ := poly.ForwardPolymorphic(net, probeIn)
+	if out == nil || len(out.Data) == 0 {
+		return nil, fmt.Errorf("probe forward returned nil/empty")
+	}
+	outN := len(out.Data)
+	outShape := append([]int(nil), out.Shape...)
+
+	batches := make([]poly.TrainingBatch[float32], n)
+	for i := range batches {
+		x := make([]float32, inDim)
+		for j := range x {
+			x[j] = float32((i*3+j)%11)/11
+		}
+		tgt := make([]float32, outN)
+		for j := range tgt {
+			// Scaled input + tiny bias — constant bias alone is learnable if tile is hard.
+			tgt[j] = x[j%inDim]*0.5 + 0.25
+		}
+		batches[i] = poly.TrainingBatch[float32]{
+			Input:  poly.NewTensorFromSlice(x, 1, inDim),
+			Target: poly.NewTensorFromSlice(tgt, outShape...),
 		}
 	}
 	return batches, nil
@@ -222,23 +314,25 @@ func vec(n int) []float32 {
 	return out
 }
 
-func sinVec(n int) []float32 {
-	out := make([]float32, n)
-	for i := range out {
-		out[i] = float32(math.Sin(float64(i+1) * 0.41))
+// microClassBatches: easy 4-way class from dominant feature block (learnable to ~90%+).
+// Labels cycle; shards see mostly one class each when K % classes == 0 — fine for oracle coverage.
+func microClassBatches(n, inDim, outDim int) []poly.TrainingBatch[float32] {
+	if outDim < 2 {
+		outDim = 2
 	}
-	return out
-}
-
-func syntheticVectorBatches(n, inDim, outDim int) []poly.TrainingBatch[float32] {
 	batches := make([]poly.TrainingBatch[float32], n)
 	for i := range batches {
+		label := i % outDim
 		x := make([]float32, inDim)
-		y := make([]float32, outDim)
-		for j := range x {
-			x[j] = float32((i+j)%7) / 7
+		// Near one-hot class cue in the first outDim dims + weak fillers.
+		for j := 0; j < inDim; j++ {
+			x[j] = 0.02 * float32((i+j)%3)
 		}
-		y[i%outDim] = 1
+		if label < inDim {
+			x[label] = 1.5
+		}
+		y := make([]float32, outDim)
+		y[label] = 1
 		batches[i] = poly.TrainingBatch[float32]{
 			Input:  poly.NewTensorFromSlice(x, 1, inDim),
 			Target: poly.NewTensorFromSlice(y, 1, outDim),
